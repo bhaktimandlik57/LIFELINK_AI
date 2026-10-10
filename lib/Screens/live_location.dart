@@ -1,18 +1,28 @@
+
 import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:latlong2/latlong.dart';
 
 class LiveLocationScreen extends StatefulWidget {
   const LiveLocationScreen({super.key});
 
   @override
-  State<LiveLocationScreen> createState() => _LiveLocationScreenState();
+  State<LiveLocationScreen> createState() =>
+      _LiveLocationScreenState();
 }
 
-class _LiveLocationScreenState extends State<LiveLocationScreen> {
+class _LiveLocationScreenState
+    extends State<LiveLocationScreen> {
   Position? position;
   StreamSubscription<Position>? positionSubscription;
 
+  final MapController mapController = MapController();
+
+  bool mapReady = false;
+  bool loading = false;
   String status = 'Getting your location...';
 
   @override
@@ -22,37 +32,48 @@ class _LiveLocationScreenState extends State<LiveLocationScreen> {
   }
 
   Future<void> startLocation() async {
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (loading) return;
 
-    if (!serviceEnabled) {
+    loading = true;
+
+    if (mounted) {
       setState(() {
-        status = 'Please turn ON Location/GPS.';
+        status = 'Getting your location...';
       });
-      return;
-    }
-
-    LocationPermission permission = await Geolocator.checkPermission();
-
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-
-    if (permission == LocationPermission.denied) {
-      setState(() {
-        status = 'Location permission denied.';
-      });
-      return;
-    }
-
-    if (permission == LocationPermission.deniedForever) {
-      setState(() {
-        status = 'Location permission permanently denied.';
-      });
-      return;
     }
 
     try {
-      Position currentPosition =
+      final serviceEnabled =
+      await Geolocator.isLocationServiceEnabled();
+
+      if (!serviceEnabled) {
+        if (mounted) {
+          setState(() {
+            status = 'Please turn ON Location/GPS.';
+          });
+        }
+        return;
+      }
+
+      LocationPermission permission =
+      await Geolocator.checkPermission();
+
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          setState(() {
+            status =
+            'Location permission denied. Please allow location access.';
+          });
+        }
+        return;
+      }
+
+      final currentPosition =
       await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.high,
@@ -66,35 +87,82 @@ class _LiveLocationScreenState extends State<LiveLocationScreen> {
         status = 'Live location active';
       });
 
+      if (mapReady) {
+        mapController.move(
+          LatLng(
+            currentPosition.latitude,
+            currentPosition.longitude,
+          ),
+          16,
+        );
+      }
+
+      await positionSubscription?.cancel();
+
       positionSubscription = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.high,
           distanceFilter: 5,
         ),
-      ).listen((Position newPosition) {
-        if (!mounted) return;
+      ).listen(
+            (newPosition) {
+          if (!mounted) return;
 
-        setState(() {
-          position = newPosition;
-        });
-      });
+          setState(() {
+            position = newPosition;
+            status = 'Live location active';
+          });
+        },
+        onError: (error) {
+          if (!mounted) return;
+
+          setState(() {
+            status = 'Location updates unavailable.';
+          });
+        },
+      );
     } catch (e) {
-      if (!mounted) return;
-
-      setState(() {
-        status = 'Unable to get location.';
-      });
+      if (mounted) {
+        setState(() {
+          status = position == null
+              ? 'Unable to get location. Please try again.'
+              : 'Showing last received GPS position.';
+        });
+      }
+    } finally {
+      loading = false;
+      if (mounted) setState(() {});
     }
+  }
+
+  void centerOnLocation() {
+    if (position == null || !mapReady) return;
+
+    mapController.move(
+      LatLng(
+        position!.latitude,
+        position!.longitude,
+      ),
+      16,
+    );
   }
 
   @override
   void dispose() {
     positionSubscription?.cancel();
+    mapController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final currentPoint = position == null
+        ? const LatLng(20.5937, 78.9629)
+        : LatLng(
+      position!.latitude,
+      position!.longitude,
+    );
+
     return Scaffold(
       backgroundColor: const Color(0xFFF7F8FA),
       appBar: AppBar(
@@ -106,84 +174,183 @@ class _LiveLocationScreenState extends State<LiveLocationScreen> {
         foregroundColor: Colors.black,
         elevation: 0,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            const SizedBox(height: 30),
-
-            Container(
-              padding: const EdgeInsets.all(25),
-              decoration: BoxDecoration(
-                color: Colors.green.withValues(alpha: 0.1),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.location_on,
-                color: Colors.green,
-                size: 65,
-              ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(14),
             ),
-
-            const SizedBox(height: 25),
-
-            Text(
-              status,
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: position != null
-                    ? Colors.green
-                    : Colors.orange,
-              ),
-              textAlign: TextAlign.center,
-            ),
-
-            const SizedBox(height: 30),
-
-            if (position != null)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(
-                    color: Colors.grey.shade200,
+            child: Row(
+              children: [
+                Icon(
+                  position == null
+                      ? Icons.location_searching
+                      : Icons.gps_fixed,
+                  color: position == null
+                      ? Colors.orange
+                      : Colors.green,
+                  size: 30,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    status,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ),
-                child: Column(
-                  children: [
-                    _locationRow(
-                      'Latitude',
-                      position!.latitude.toStringAsFixed(6),
+                if (loading)
+                  const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
                     ),
-                    const Divider(height: 25),
-                    _locationRow(
-                      'Longitude',
-                      position!.longitude.toStringAsFixed(6),
-                    ),
-                    const Divider(height: 25),
-                    _locationRow(
-                      'Accuracy',
-                      '${position!.accuracy.toStringAsFixed(1)} m',
-                    ),
-                  ],
+                  ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: SizedBox(
+              height: 340,
+              child: FlutterMap(
+                mapController: mapController,
+                options: MapOptions(
+                  initialCenter: currentPoint,
+                  initialZoom: position == null ? 5 : 16,
+                  onMapReady: () {
+                    mapReady = true;
+                    if (position != null) {
+                      centerOnLocation();
+                    }
+                  },
                 ),
-              ),
+                children: [
+                  TileLayer(
+                    urlTemplate:
+                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    userAgentPackageName:
+                    'com.lifelinkai.app',
+                  ),
 
-            const SizedBox(height: 25),
+                  if (position != null)
+                    MarkerLayer(
+                      markers: [
+                        Marker(
+                          point: currentPoint,
+                          width: 60,
+                          height: 60,
+                          child: const Icon(
+                            Icons.location_pin,
+                            size: 48,
+                            color: Colors.red,
+                          ),
+                        ),
+                      ],
+                    ),
 
-            const Text(
-              'This is the real GPS position of this device.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Colors.black54,
-                height: 1.5,
+                  const RichAttributionWidget(
+                    attributions: [
+                      TextSourceAttribution(
+                        'OpenStreetMap contributors',
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
-          ],
-        ),
+          ),
+
+          const SizedBox(height: 10),
+
+          const Text(
+            'Map data © OpenStreetMap contributors. '
+                'Internet is required to load map tiles.',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.black54,
+            ),
+            textAlign: TextAlign.center,
+          ),
+
+          const SizedBox(height: 16),
+
+          if (position != null)
+            Container(
+              padding: const EdgeInsets.all(18),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: Colors.grey.shade200,
+                ),
+              ),
+              child: Column(
+                children: [
+                  _locationRow(
+                    'Latitude',
+                    position!.latitude.toStringAsFixed(6),
+                  ),
+                  const Divider(height: 24),
+                  _locationRow(
+                    'Longitude',
+                    position!.longitude.toStringAsFixed(6),
+                  ),
+                  const Divider(height: 24),
+                  _locationRow(
+                    'Accuracy',
+                    '${position!.accuracy.toStringAsFixed(1)} m',
+                  ),
+                ],
+              ),
+            ),
+
+          const SizedBox(height: 16),
+
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: loading ? null : startLocation,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Refresh GPS'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 14,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: position == null
+                      ? null
+                      : centerOnLocation,
+                  icon: const Icon(Icons.my_location),
+                  label: const Text('My Location'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.red,
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 14,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -198,11 +365,14 @@ class _LiveLocationScreenState extends State<LiveLocationScreen> {
           ),
         ),
         const Spacer(),
-        Text(
-          value,
-          style: const TextStyle(
-            color: Colors.blue,
-            fontWeight: FontWeight.bold,
+        Flexible(
+          child: Text(
+            value,
+            textAlign: TextAlign.end,
+            style: const TextStyle(
+              color: Colors.blue,
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ),
       ],

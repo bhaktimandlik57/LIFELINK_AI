@@ -1,674 +1,704 @@
-import 'dart:io';
+
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+// ============================================================
+// SOS CONFIRMATION SCREEN
+// ============================================================
+
 class SOSConfirmationScreen extends StatefulWidget {
-  final String emergencyType;
+final String emergencyType;
 
-  const SOSConfirmationScreen({
-    super.key,
-    required this.emergencyType,
-  });
+const SOSConfirmationScreen({
+super.key,
+required this.emergencyType,
+});
 
-  @override
-  State<SOSConfirmationScreen> createState() =>
-      _SOSConfirmationScreenState();
+@override
+State<SOSConfirmationScreen> createState() =>
+_SOSConfirmationScreenState();
 }
 
-class _SOSConfirmationScreenState extends State<SOSConfirmationScreen> {
-  bool isGettingLocation = false;
+class _SOSConfirmationScreenState
+extends State<SOSConfirmationScreen> {
+bool isGettingLocation = false;
 
-  String? voicePath;
-  bool isVoiceAttached = false;
+String? voicePath;
+bool isVoiceAttached = false;
 
-  @override
-  void initState() {
-    super.initState();
-    loadVoiceMessage();
-  }
-
-  Future<void> loadVoiceMessage() async {
-    final prefs = await SharedPreferences.getInstance();
-
-    final savedPath = prefs.getString('latest_voice_path');
-
-    if (!mounted) return;
-
-    if (savedPath != null &&
-        savedPath.isNotEmpty &&
-        File(savedPath).existsSync()) {
-      setState(() {
-        voicePath = savedPath;
-        isVoiceAttached = true;
-      });
-    } else {
-      setState(() {
-        voicePath = null;
-        isVoiceAttached = false;
-      });
-    }
-  }
-
-  Future<void> sendSOS() async {
-    setState(() {
-      isGettingLocation = true;
-    });
-
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-
-    if (!serviceEnabled) {
-      if (!mounted) return;
-
-      setState(() {
-        isGettingLocation = false;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please turn ON your phone location/GPS.'),
-        ),
-      );
-      return;
-    }
-
-    LocationPermission permission = await Geolocator.checkPermission();
-
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-
-    if (permission == LocationPermission.denied ||
-        permission == LocationPermission.deniedForever) {
-      if (!mounted) return;
-
-      setState(() {
-        isGettingLocation = false;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Location permission is required for SOS.'),
-        ),
-      );
-      return;
-    }
-
-    try {
-      Position position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-        ),
-      );
-
-      final sosId =
-          'SOS-${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}';
-
-      // IMPORTANT:
-      // This packet now contains the actual emergency type
-      // selected by the user on the Home Screen.
-      final sosData = {
-        'sosId': sosId,
-
-        // Actual selected emergency type
-        'type': widget.emergencyType,
-
-        'latitude': position.latitude,
-        'longitude': position.longitude,
-        'timestamp': DateTime.now().toIso8601String(),
-        'status': 'RELAY_PENDING',
-        'network': 'Waiting for network',
-
-        // Actual voice recording path
-        'voicePath': voicePath,
-
-        // Actual voice attachment status
-        'voiceAttached': isVoiceAttached,
-      };
-
-      final prefs = await SharedPreferences.getInstance();
-
-      await prefs.setString(
-        'latest_sos',
-        jsonEncode(sosData),
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        isGettingLocation = false;
-      });
-
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => SOSSentScreen(
-            latitude: position.latitude,
-            longitude: position.longitude,
-            voiceAttached: isVoiceAttached,
-            emergencyType: widget.emergencyType,
-          ),
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-
-      setState(() {
-        isGettingLocation = false;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Unable to get your current location.'),
-        ),
-      );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF7F8FA),
-      appBar: AppBar(
-        title: const Text(
-          'Emergency SOS',
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black,
-        elevation: 0,
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(22),
-              decoration: BoxDecoration(
-                color: Colors.red.withValues(alpha: 0.12),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.warning_rounded,
-                color: Colors.red,
-                size: 70,
-              ),
-            ),
-
-            const SizedBox(height: 30),
-
-            const Text(
-              'Are you in an emergency?',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 26,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-
-            const SizedBox(height: 12),
-
-            const Text(
-              'Press confirm only if you need immediate emergency assistance.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 15,
-                color: Colors.grey,
-              ),
-            ),
-
-            const SizedBox(height: 22),
-
-            // SHOW SELECTED EMERGENCY TYPE
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.red.withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: Colors.red.withValues(alpha: 0.25),
-                ),
-              ),
-              child: Row(
-                children: [
-                  const Icon(
-                    Icons.emergency,
-                    color: Colors.red,
-                  ),
-                  const SizedBox(width: 12),
-                  const Text(
-                    'Emergency Type:',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      widget.emergencyType,
-                      textAlign: TextAlign.end,
-                      style: const TextStyle(
-                        color: Colors.red,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 15),
-
-            // VOICE ATTACHMENT STATUS
-            if (isVoiceAttached)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: Colors.green.withValues(alpha: 0.10),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: Colors.green.withValues(alpha: 0.35),
-                  ),
-                ),
-                child: const Row(
-                  children: [
-                    Icon(
-                      Icons.mic,
-                      color: Colors.green,
-                    ),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'Voice emergency message attached',
-                        style: TextStyle(
-                          color: Colors.green,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    Icon(
-                      Icons.check_circle,
-                      color: Colors.green,
-                    ),
-                  ],
-                ),
-              ),
-
-            if (!isVoiceAttached)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: Colors.grey.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: Colors.grey.withValues(alpha: 0.25),
-                  ),
-                ),
-                child: const Row(
-                  children: [
-                    Icon(
-                      Icons.mic_off,
-                      color: Colors.grey,
-                    ),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'No voice message attached',
-                        style: TextStyle(
-                          color: Colors.grey,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            const SizedBox(height: 25),
-
-            SizedBox(
-              width: double.infinity,
-              height: 55,
-              child: ElevatedButton(
-                onPressed: isGettingLocation ? null : sendSOS,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-                child: isGettingLocation
-                    ? const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    SizedBox(
-                      width: 22,
-                      height: 22,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    ),
-                    SizedBox(width: 12),
-                    Text(
-                      'Getting Location...',
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                )
-                    : const Text(
-                  'YES, SEND SOS',
-                  style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 15),
-
-            SizedBox(
-              width: double.infinity,
-              height: 55,
-              child: OutlinedButton(
-                onPressed: isGettingLocation
-                    ? null
-                    : () {
-                  Navigator.pop(context);
-                },
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.black87,
-                  side: const BorderSide(
-                    color: Colors.grey,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-                child: const Text(
-                  'NO, GO BACK',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+@override
+void initState() {
+super.initState();
+loadVoiceMessage();
 }
 
-class SOSSentScreen extends StatelessWidget {
-  final double latitude;
-  final double longitude;
-  final bool voiceAttached;
-  final String emergencyType;
+// LOAD THE CURRENT VOICE MESSAGE
+Future<void> loadVoiceMessage() async {
+try {
+final prefs = await SharedPreferences.getInstance();
+final savedPath = prefs.getString('latest_voice_path');
 
-  const SOSSentScreen({
-    super.key,
-    required this.latitude,
-    required this.longitude,
-    required this.voiceAttached,
-    required this.emergencyType,
-  });
+if (savedPath != null &&
+savedPath.isNotEmpty &&
+await File(savedPath).exists()) {
+if (!mounted) return;
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF7F8FA),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(25),
-                decoration: BoxDecoration(
-                  color: Colors.green.withValues(alpha: 0.12),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.check_circle,
-                  color: Colors.green,
-                  size: 80,
-                ),
-              ),
+setState(() {
+voicePath = savedPath;
+isVoiceAttached = true;
+});
+} else {
+await prefs.remove('latest_voice_path');
 
-              const SizedBox(height: 25),
+if (!mounted) return;
 
-              const Text(
-                'SOS Request Created',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 27,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
+setState(() {
+voicePath = null;
+isVoiceAttached = false;
+});
+}
+} catch (_) {
+if (!mounted) return;
 
-              const SizedBox(height: 12),
+setState(() {
+voicePath = null;
+isVoiceAttached = false;
+});
+}
+}
 
-              const Text(
-                'Your emergency request has been stored and is ready to be relayed to the rescue network.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 15,
-                  color: Colors.grey,
-                  height: 1.5,
-                ),
-              ),
+// SEND SOS
+Future<void> sendSOS() async {
+if (isGettingLocation) return;
 
-              const SizedBox(height: 35),
+setState(() {
+isGettingLocation = true;
+});
 
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Column(
-                  children: [
-                    // EMERGENCY TYPE
-                    Row(
-                      children: [
-                        const Icon(
-                          Icons.emergency,
-                          color: Colors.red,
-                        ),
-                        const SizedBox(width: 12),
-                        const Text(
-                          'Emergency Type',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const Spacer(),
-                        Flexible(
-                          child: Text(
-                            emergencyType,
-                            textAlign: TextAlign.end,
-                            style: const TextStyle(
-                              color: Colors.red,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+try {
+// CHECK LOCATION SERVICE
+final bool serviceEnabled =
+await Geolocator.isLocationServiceEnabled();
 
-                    const SizedBox(height: 15),
+if (!serviceEnabled) {
+_resetSendingState();
 
-                    const Row(
-                      children: [
-                        Icon(
-                          Icons.location_on,
-                          color: Colors.red,
-                        ),
-                        SizedBox(width: 12),
-                        Text(
-                          'Location',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        Spacer(),
-                        Text(
-                          'Captured',
-                          style: TextStyle(
-                            color: Colors.green,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
+if (!mounted) return;
+_showMessage('Please turn on location services.');
+return;
+}
 
-                    const SizedBox(height: 15),
+// CHECK LOCATION PERMISSION
+LocationPermission permission =
+await Geolocator.checkPermission();
 
-                    Row(
-                      children: [
-                        const Text(
-                          'Latitude:',
-                          style: TextStyle(
-                            color: Colors.grey,
-                          ),
-                        ),
-                        const Spacer(),
-                        Text(
-                          latitude.toStringAsFixed(6),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.blue,
-                          ),
-                        ),
-                      ],
-                    ),
+if (permission == LocationPermission.denied) {
+permission = await Geolocator.requestPermission();
+}
 
-                    const SizedBox(height: 8),
+if (permission == LocationPermission.denied ||
+permission == LocationPermission.deniedForever) {
+_resetSendingState();
 
-                    Row(
-                      children: [
-                        const Text(
-                          'Longitude:',
-                          style: TextStyle(
-                            color: Colors.grey,
-                          ),
-                        ),
-                        const Spacer(),
-                        Text(
-                          longitude.toStringAsFixed(6),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.blue,
-                          ),
-                        ),
-                      ],
-                    ),
+if (!mounted) return;
+_showMessage(
+'Location permission is required to send SOS.',
+);
+return;
+}
 
-                    const SizedBox(height: 15),
+// GET CURRENT LOCATION
+final Position position =
+await Geolocator.getCurrentPosition(
+locationSettings: const LocationSettings(
+accuracy: LocationAccuracy.medium,
+),
+);
 
-                    const Row(
-                      children: [
-                        Icon(
-                          Icons.wifi_off,
-                          color: Colors.orange,
-                        ),
-                        SizedBox(width: 12),
-                        Text(
-                          'Network',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        Spacer(),
-                        Text('Relay Pending'),
-                      ],
-                    ),
+// VERIFY VOICE FILE
+String? validVoicePath = voicePath;
+bool validVoiceAttached = isVoiceAttached;
 
-                    const SizedBox(height: 15),
+if (validVoicePath != null &&
+!await File(validVoicePath).exists()) {
+validVoicePath = null;
+validVoiceAttached = false;
+}
 
-                    Row(
-                      children: [
-                        Icon(
-                          voiceAttached
-                              ? Icons.mic
-                              : Icons.mic_off,
-                          color: voiceAttached
-                              ? Colors.green
-                              : Colors.grey,
-                        ),
-                        const SizedBox(width: 12),
-                        const Text(
-                          'Voice Message',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const Spacer(),
-                        Text(
-                          voiceAttached
-                              ? 'Attached'
-                              : 'Not Attached',
-                          style: TextStyle(
-                            color: voiceAttached
-                                ? Colors.green
-                                : Colors.grey,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
+// CREATE SOS ID
+final String sosId =
+'SOS-${DateTime.now().millisecondsSinceEpoch}';
 
-              const SizedBox(height: 30),
+// PREPARE SOS DATA
+final Map<String, dynamic> sosData = {
+'sosId': sosId,
+'type': widget.emergencyType,
+'latitude': position.latitude,
+'longitude': position.longitude,
+'timestamp': DateTime.now().toIso8601String(),
+'status': 'RELAY_PENDING',
+'network': 'Waiting for network',
+'voicePath': validVoicePath,
+'voiceAttached': validVoiceAttached,
+};
 
-              SizedBox(
-                width: double.infinity,
-                height: 55,
-                child: ElevatedButton(
-                  onPressed: () {
-                    Navigator.popUntil(
-                      context,
-                          (route) => route.isFirst,
-                    );
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.black87,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  child: const Text(
-                    'RETURN TO HOME',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+// SAVE SOS LOCALLY
+final prefs = await SharedPreferences.getInstance();
+
+await prefs.setString(
+'latest_sos',
+jsonEncode(sosData),
+);
+
+// Clear the saved voice path so an old recording
+// is not automatically attached to the next SOS.
+await prefs.remove('latest_voice_path');
+
+if (!mounted) return;
+
+setState(() {
+isGettingLocation = false;
+voicePath = null;
+isVoiceAttached = false;
+});
+
+// OPEN SOS SENT SCREEN
+Navigator.push(
+context,
+MaterialPageRoute(
+builder: (context) => SOSSentScreen(
+latitude: position.latitude,
+longitude: position.longitude,
+voiceAttached: validVoiceAttached,
+emergencyType: widget.emergencyType,
+),
+),
+);
+} catch (e) {
+_resetSendingState();
+
+if (!mounted) return;
+_showMessage('Unable to send SOS: $e');
+}
+}
+
+void _resetSendingState() {
+if (!mounted) return;
+
+setState(() {
+isGettingLocation = false;
+});
+}
+
+void _showMessage(String message) {
+ScaffoldMessenger.of(context).showSnackBar(
+SnackBar(content: Text(message)),
+);
+}
+
+@override
+Widget build(BuildContext context) {
+return Scaffold(
+backgroundColor: const Color(0xFFF7F8FA),
+appBar: AppBar(
+title: const Text(
+'Emergency SOS',
+style: TextStyle(fontWeight: FontWeight.bold),
+),
+backgroundColor: Colors.white,
+foregroundColor: Colors.black,
+elevation: 0,
+),
+body: SafeArea(
+child: SingleChildScrollView(
+padding: const EdgeInsets.all(24),
+child: Column(
+children: [
+const SizedBox(height: 20),
+Container(
+width: 80,
+height: 80,
+decoration: BoxDecoration(
+color: Colors.red.withValues(alpha: 0.10),
+shape: BoxShape.circle,
+),
+child: const Icon(
+Icons.warning_rounded,
+color: Colors.red,
+size: 45,
+),
+),
+const SizedBox(height: 24),
+const Text(
+'Are you in an emergency?',
+textAlign: TextAlign.center,
+style: TextStyle(
+fontSize: 25,
+fontWeight: FontWeight.bold,
+),
+),
+const SizedBox(height: 10),
+const Text(
+'Your emergency alert will be saved '
+'for the rescue network.',
+textAlign: TextAlign.center,
+style: TextStyle(
+color: Colors.grey,
+fontSize: 15,
+),
+),
+const SizedBox(height: 30),
+_infoCard(
+icon: Icons.emergency,
+iconColor: Colors.red,
+title: 'Emergency Type',
+value: widget.emergencyType,
+borderColor: Colors.red,
+),
+const SizedBox(height: 15),
+_infoCard(
+icon: isVoiceAttached ? Icons.mic : Icons.mic_off,
+iconColor: Colors.blue,
+title: 'Voice Message',
+value: isVoiceAttached
+? 'Voice message attached'
+    : 'No voice message attached',
+borderColor: Colors.blue,
+),
+const SizedBox(height: 30),
+
+// SEND SOS BUTTON
+SizedBox(
+width: double.infinity,
+height: 55,
+child: ElevatedButton(
+onPressed: isGettingLocation ? null : sendSOS,
+style: ElevatedButton.styleFrom(
+backgroundColor: Colors.red,
+foregroundColor: Colors.white,
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(14),
+),
+),
+child: isGettingLocation
+? const SizedBox(
+width: 24,
+height: 24,
+child: CircularProgressIndicator(
+color: Colors.white,
+strokeWidth: 2,
+),
+)
+    : const Text(
+'YES, SEND SOS',
+style: TextStyle(
+fontSize: 16,
+fontWeight: FontWeight.bold,
+),
+),
+),
+),
+const SizedBox(height: 12),
+
+// CANCEL BUTTON
+SizedBox(
+width: double.infinity,
+height: 55,
+child: OutlinedButton(
+onPressed: isGettingLocation
+? null
+    : () => Navigator.pop(context),
+style: OutlinedButton.styleFrom(
+foregroundColor: Colors.black87,
+side: const BorderSide(color: Colors.grey),
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(14),
+),
+),
+child: const Text(
+'NO, GO BACK',
+style: TextStyle(
+fontSize: 16,
+fontWeight: FontWeight.bold,
+),
+),
+),
+),
+],
+),
+),
+),
+);
+}
+
+Widget _infoCard({
+required IconData icon,
+required Color iconColor,
+required String title,
+required String value,
+required Color borderColor,
+}) {
+return Container(
+width: double.infinity,
+padding: const EdgeInsets.all(18),
+decoration: BoxDecoration(
+color: Colors.white,
+borderRadius: BorderRadius.circular(16),
+border: Border.all(
+color: borderColor.withValues(alpha: 0.15),
+),
+),
+child: Row(
+children: [
+Container(
+width: 48,
+height: 48,
+decoration: BoxDecoration(
+color: iconColor.withValues(alpha: 0.10),
+borderRadius: BorderRadius.circular(12),
+),
+child: Icon(icon, color: iconColor),
+),
+const SizedBox(width: 14),
+Expanded(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(
+title,
+style: const TextStyle(
+color: Colors.grey,
+fontSize: 13,
+),
+),
+const SizedBox(height: 4),
+Text(
+value,
+style: const TextStyle(
+fontSize: 16,
+fontWeight: FontWeight.w600,
+),
+),
+],
+),
+),
+],
+),
+);
+}
+}
+
+// ============================================================
+// SOS SENT SCREEN
+// ============================================================
+
+class SOSSentScreen extends StatefulWidget {
+final double latitude;
+final double longitude;
+final bool voiceAttached;
+final String emergencyType;
+
+const SOSSentScreen({
+super.key,
+required this.latitude,
+required this.longitude,
+required this.voiceAttached,
+required this.emergencyType,
+});
+
+@override
+State<SOSSentScreen> createState() => _SOSSentScreenState();
+}
+
+class _SOSSentScreenState extends State<SOSSentScreen> {
+bool _stopping = false;
+
+// STOP SOS
+Future<void> _stopSOS() async {
+if (_stopping) return;
+
+setState(() {
+_stopping = true;
+});
+
+try {
+final prefs = await SharedPreferences.getInstance();
+final savedSOS = prefs.getString('latest_sos');
+
+if (savedSOS != null) {
+try {
+final Map<String, dynamic> sosData =
+Map<String, dynamic>.from(
+jsonDecode(savedSOS) as Map,
+);
+
+sosData['status'] = 'STOPPED';
+
+await prefs.setString(
+'latest_sos',
+jsonEncode(sosData),
+);
+} catch (_) {
+// Keep navigation available if stored data is invalid.
+}
+}
+} catch (_) {
+// Allow navigation even if saving fails.
+}
+
+if (!mounted) return;
+
+Navigator.pop(context);
+}
+
+@override
+Widget build(BuildContext context) {
+const Color alertColor = Colors.red;
+
+return Scaffold(
+backgroundColor: const Color(0xFFF7F8FA),
+body: SafeArea(
+child: Container(
+decoration: BoxDecoration(
+border: Border.all(
+color: alertColor,
+width: 6,
+),
+),
+child: SingleChildScrollView(
+padding: const EdgeInsets.all(24),
+child: Column(
+children: [
+const SizedBox(height: 20),
+Container(
+width: 85,
+height: 85,
+decoration: BoxDecoration(
+color: Colors.green.withValues(alpha: 0.10),
+shape: BoxShape.circle,
+),
+child: const Icon(
+Icons.check_circle,
+color: Colors.green,
+size: 55,
+),
+),
+const SizedBox(height: 24),
+const Text(
+'SOS Request Created',
+textAlign: TextAlign.center,
+style: TextStyle(
+fontSize: 25,
+fontWeight: FontWeight.bold,
+),
+),
+const SizedBox(height: 10),
+const Text(
+'Your emergency request has been stored '
+'and is ready to be relayed to the rescue network.',
+textAlign: TextAlign.center,
+style: TextStyle(
+color: Colors.grey,
+fontSize: 15,
+height: 1.4,
+),
+),
+const SizedBox(height: 30),
+Container(
+width: double.infinity,
+padding: const EdgeInsets.all(20),
+decoration: BoxDecoration(
+color: Colors.white,
+borderRadius: BorderRadius.circular(16),
+boxShadow: [
+BoxShadow(
+color: Colors.black.withValues(alpha: 0.04),
+blurRadius: 10,
+offset: const Offset(0, 4),
+),
+],
+),
+child: Column(
+children: [
+_infoRow(
+'Emergency Type',
+widget.emergencyType,
+Icons.emergency,
+),
+const Divider(height: 28),
+_infoRow(
+'Location',
+'Captured',
+Icons.location_on,
+),
+const SizedBox(height: 18),
+_infoRow(
+'Latitude',
+widget.latitude.toStringAsFixed(6),
+Icons.my_location,
+),
+const SizedBox(height: 18),
+_infoRow(
+'Longitude',
+widget.longitude.toStringAsFixed(6),
+Icons.my_location,
+),
+const Divider(height: 28),
+_infoRow(
+'Network',
+'Relay Pending',
+Icons.bluetooth,
+),
+const SizedBox(height: 18),
+_infoRow(
+'Voice Message',
+widget.voiceAttached ? 'Attached' : 'Not Attached',
+widget.voiceAttached ? Icons.mic : Icons.mic_off,
+),
+],
+),
+),
+const SizedBox(height: 25),
+Container(
+width: double.infinity,
+padding: const EdgeInsets.symmetric(
+vertical: 14,
+horizontal: 16,
+),
+decoration: BoxDecoration(
+color: alertColor.withValues(alpha: 0.10),
+borderRadius: BorderRadius.circular(12),
+border: Border.all(color: alertColor),
+),
+child: const Row(
+mainAxisAlignment: MainAxisAlignment.center,
+children: [
+Icon(
+Icons.warning_rounded,
+color: alertColor,
+),
+SizedBox(width: 8),
+Text(
+'SOS ACTIVE',
+style: TextStyle(
+color: alertColor,
+fontWeight: FontWeight.bold,
+fontSize: 16,
+),
+),
+],
+),
+),
+const SizedBox(height: 18),
+SizedBox(
+width: double.infinity,
+height: 55,
+child: ElevatedButton(
+onPressed: _stopping ? null : _stopSOS,
+style: ElevatedButton.styleFrom(
+backgroundColor: Colors.red,
+foregroundColor: Colors.white,
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(14),
+),
+),
+child: _stopping
+? const SizedBox(
+width: 23,
+height: 23,
+child: CircularProgressIndicator(
+color: Colors.white,
+strokeWidth: 2,
+),
+)
+    : const Text(
+'STOP SOS',
+style: TextStyle(
+fontSize: 16,
+fontWeight: FontWeight.bold,
+),
+),
+),
+),
+const SizedBox(height: 12),
+SizedBox(
+width: double.infinity,
+height: 52,
+child: OutlinedButton(
+onPressed: () => Navigator.pop(context),
+style: OutlinedButton.styleFrom(
+foregroundColor: Colors.black87,
+side: const BorderSide(color: Colors.grey),
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(14),
+),
+),
+child: const Text(
+'BACK',
+style: TextStyle(
+fontSize: 15,
+fontWeight: FontWeight.bold,
+),
+),
+),
+),
+],
+),
+),
+),
+),
+);
+}
+
+Widget _infoRow(
+String title,
+String value,
+IconData icon,
+) {
+return Row(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Container(
+width: 42,
+height: 42,
+decoration: BoxDecoration(
+color: Colors.grey.withValues(alpha: 0.08),
+borderRadius: BorderRadius.circular(10),
+),
+child: Icon(
+icon,
+color: Colors.black54,
+size: 21,
+),
+),
+const SizedBox(width: 12),
+Expanded(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(
+title,
+style: const TextStyle(
+color: Colors.grey,
+fontSize: 12,
+),
+),
+const SizedBox(height: 4),
+Text(
+value,
+style: const TextStyle(
+fontSize: 15,
+fontWeight: FontWeight.w600,
+),
+),
+],
+),
+),
+],
+);
+}
 }

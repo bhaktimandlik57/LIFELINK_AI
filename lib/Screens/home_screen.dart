@@ -1,3 +1,4 @@
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -6,11 +7,14 @@ import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:torch_light/torch_light.dart';
 
+import 'live_location.dart';
+import 'emergency_contacts.dart';
 import 'sos_confirmation.dart';
 import 'report_disaster.dart';
 import 'emergency_instructions.dart';
 import 'active_report.dart';
 import 'lifelink_network.dart';
+import 'notifications_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -20,30 +24,21 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // =========================
   // EMERGENCY TYPE
-  // =========================
-
   String? selectedEmergencyType;
 
   final List<String> emergencyTypes = [
-    'Medical',
-    'Accident',
-    'Fire',
-    'Crime',
+    'FLOOD',
+    'CYCLONE',
+    'EARTHQUAKE',
+    'LANDSLIDE',
     'Other',
   ];
 
-  // =========================
   // FLASHLIGHT
-  // =========================
-
   bool isFlashlightOn = false;
 
-  // =========================
   // VOICE RECORDING
-  // =========================
-
   final AudioRecorder _audioRecorder = AudioRecorder();
 
   bool isRecording = false;
@@ -59,10 +54,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  // =========================
   // FLASHLIGHT
-  // =========================
-
   Future<void> toggleFlashlight() async {
     try {
       if (isFlashlightOn) {
@@ -70,6 +62,8 @@ class _HomeScreenState extends State<HomeScreen> {
       } else {
         await TorchLight.enableTorch();
       }
+
+      if (!mounted) return;
 
       setState(() {
         isFlashlightOn = !isFlashlightOn;
@@ -85,10 +79,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // =========================
   // START VOICE RECORDING
-  // =========================
-
   Future<void> startVoiceRecording() async {
     try {
       final hasPermission = await _audioRecorder.hasPermission();
@@ -119,6 +110,7 @@ class _HomeScreenState extends State<HomeScreen> {
       );
 
       recordingTimer?.cancel();
+      recordingDuration = Duration.zero;
 
       recordingTimer = Timer.periodic(
         const Duration(seconds: 1),
@@ -131,9 +123,10 @@ class _HomeScreenState extends State<HomeScreen> {
         },
       );
 
+      if (!mounted) return;
+
       setState(() {
         isRecording = true;
-        recordingDuration = Duration.zero;
         voicePath = null;
       });
     } catch (e) {
@@ -147,15 +140,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // =========================
   // STOP VOICE RECORDING
-  // =========================
-
   Future<void> stopVoiceRecording() async {
     try {
       recordingTimer?.cancel();
 
       final path = await _audioRecorder.stop();
+
+      if (!mounted) return;
 
       setState(() {
         isRecording = false;
@@ -164,11 +156,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (path != null && path.isNotEmpty) {
         final prefs = await SharedPreferences.getInstance();
-
-        await prefs.setString(
-          'latest_voice_path',
-          path,
-        );
+        await prefs.setString('latest_voice_path', path);
 
         if (!mounted) return;
 
@@ -189,10 +177,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // =========================
   // VOICE BUTTON
-  // =========================
-
   Future<void> handleVoiceButton() async {
     if (isRecording) {
       await stopVoiceRecording();
@@ -201,21 +186,25 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // =========================
   // SEND SOS
-  // =========================
-
-  void openSOSConfirmation() {
+  Future<void> openSOSConfirmation() async {
     if (selectedEmergencyType == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'Please select an emergency type first.',
-          ),
+          content: Text('Please select an emergency type first.'),
         ),
       );
       return;
     }
+
+    final prefs = await SharedPreferences.getInstance();
+
+    // Remove any previous voice attachment if no new one was recorded.
+    if (voicePath == null || voicePath!.isEmpty) {
+      await prefs.remove('latest_voice_path');
+    }
+
+    if (!mounted) return;
 
     Navigator.push(
       context,
@@ -227,36 +216,23 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // =========================
   // EMERGENCY ICON
-  // =========================
-
   IconData emergencyIcon(String type) {
     switch (type) {
       case 'Medical':
         return Icons.medical_services_outlined;
-
       case 'Accident':
         return Icons.car_crash_outlined;
-
       case 'Fire':
         return Icons.local_fire_department_outlined;
-
       case 'Crime':
         return Icons.local_police_outlined;
-
-      case 'Other':
-        return Icons.warning_amber_outlined;
-
       default:
         return Icons.warning_amber_outlined;
     }
   }
 
-  // =========================
-  // QUICK ACTION
-  // =========================
-
+  // QUICK ACTION CARD
   Widget quickAction({
     required IconData icon,
     required String title,
@@ -284,9 +260,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Icon(
                 icon,
                 size: 30,
-                color: active
-                    ? Colors.red
-                    : const Color(0xFF1976D2),
+                color: active ? Colors.red : const Color(0xFF1976D2),
               ),
               const SizedBox(height: 8),
               Text(
@@ -304,43 +278,94 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // =========================
-  // BUILD
-  // =========================
+  // FULL-WIDTH NAVIGATION CARD
+  Widget navigationCard({
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: Colors.grey.shade200,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              color: iconColor,
+              size: 30,
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      color: Colors.grey.shade600,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(
+              Icons.arrow_forward_ios,
+              size: 16,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF7F8FA),
-
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        title: const Text(
-          'LIFELINK AI',
-          style: TextStyle(
-            color: Colors.black87,
-            fontWeight: FontWeight.bold,
+        title: const Text('LIFELINK AI'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.notifications_outlined),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const NotificationsScreen(),
+                ),
+              );
+            },
           ),
-        ),
-        centerTitle: false,
+        ],
       ),
-
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            20,
-            18,
-            20,
-            30,
-          ),
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 30),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // =========================
               // WELCOME
-              // =========================
-
               const Text(
                 'Emergency Assistance',
                 style: TextStyle(
@@ -348,9 +373,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 8),
-
               Text(
                 'Select the emergency type and send an SOS when needed.',
                 style: TextStyle(
@@ -361,10 +384,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
               const SizedBox(height: 24),
 
-              // =========================
               // EMERGENCY TYPE
-              // =========================
-
               const Text(
                 'Emergency Type',
                 style: TextStyle(
@@ -372,31 +392,20 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 10),
 
               DropdownButtonFormField<String>(
                 value: selectedEmergencyType,
-                hint: const Text(
-                  'Select Emergency Type',
-                ),
+                hint: const Text('Select Emergency Type'),
+                isExpanded: true,
                 decoration: InputDecoration(
                   prefixIcon: selectedEmergencyType == null
-                      ? const Icon(
-                    Icons.warning_amber_outlined,
-                  )
-                      : Icon(
-                    emergencyIcon(
-                      selectedEmergencyType!,
-                    ),
-                  ),
+                      ? const Icon(Icons.warning_amber_outlined)
+                      : Icon(emergencyIcon(selectedEmergencyType!)),
                   filled: true,
                   fillColor: Colors.white,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
-                    borderSide: BorderSide(
-                      color: Colors.grey.shade300,
-                    ),
                   ),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
@@ -412,14 +421,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
-                items: emergencyTypes.map(
-                      (type) {
-                    return DropdownMenuItem<String>(
-                      value: type,
-                      child: Text(type),
-                    );
-                  },
-                ).toList(),
+                items: emergencyTypes.map((type) {
+                  return DropdownMenuItem<String>(
+                    value: type,
+                    child: Text(type),
+                  );
+                }).toList(),
                 onChanged: (value) {
                   setState(() {
                     selectedEmergencyType = value;
@@ -429,32 +436,27 @@ class _HomeScreenState extends State<HomeScreen> {
 
               const SizedBox(height: 24),
 
-              // =========================
               // SOS BUTTON
-              // =========================
-
-              SizedBox(
-                width: double.infinity,
-                height: 64,
-                child: ElevatedButton.icon(
-                  onPressed: openSOSConfirmation,
-                  icon: const Icon(
-                    Icons.sos,
-                    size: 30,
-                    color: Colors.white,
-                  ),
-                  label: const Text(
-                    'SEND SOS',
-                    style: TextStyle(
-                      fontSize: 19,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
+              Center(
+                child: SizedBox(
+                  width: 150,
+                  height: 150,
+                  child: ElevatedButton(
+                    onPressed: openSOSConfirmation,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                      shape: const CircleBorder(),
+                      elevation: 4,
+                      padding: EdgeInsets.zero,
                     ),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
+                    child: const Text(
+                      'SEND SOS',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ),
@@ -462,10 +464,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
               const SizedBox(height: 28),
 
-              // =========================
               // QUICK ACTIONS
-              // =========================
-
               const Text(
                 'Quick Actions',
                 style: TextStyle(
@@ -473,10 +472,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 12),
 
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   quickAction(
                     icon: isFlashlightOn
@@ -488,25 +487,21 @@ class _HomeScreenState extends State<HomeScreen> {
                     active: isFlashlightOn,
                     onTap: toggleFlashlight,
                   ),
-
                   const SizedBox(width: 12),
-
                   quickAction(
                     icon: isRecording
                         ? Icons.stop_circle_outlined
                         : Icons.mic_none_outlined,
-                    title: isRecording
-                        ? 'Stop Voice'
-                        : 'Voice Message',
+                    title: isRecording ? 'Stop Voice' : 'Voice Message',
                     active: isRecording,
                     onTap: handleVoiceButton,
                   ),
                 ],
               ),
 
-              const SizedBox(height: 12),
-
-              if (isRecording)
+              // VOICE RECORDING STATUS
+              if (isRecording) ...[
+                const SizedBox(height: 12),
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(14),
@@ -516,10 +511,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   child: Row(
                     children: [
-                      const Icon(
-                        Icons.mic,
-                        color: Colors.red,
-                      ),
+                      const Icon(Icons.mic, color: Colors.red),
                       const SizedBox(width: 10),
                       Text(
                         'Recording: ${recordingDuration.inSeconds}s',
@@ -531,11 +523,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                 ),
+              ],
 
-              if (voicePath != null && !isRecording)
+              if (voicePath != null && !isRecording) ...[
+                const SizedBox(height: 12),
                 Container(
                   width: double.infinity,
-                  margin: const EdgeInsets.only(top: 10),
                   padding: const EdgeInsets.all(14),
                   decoration: BoxDecoration(
                     color: Colors.green.withValues(alpha: 0.08),
@@ -543,28 +536,79 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   child: const Row(
                     children: [
-                      Icon(
-                        Icons.check_circle,
-                        color: Colors.green,
-                      ),
+                      Icon(Icons.check_circle, color: Colors.green),
                       SizedBox(width: 10),
-                      Text(
-                        'Voice message attached',
-                        style: TextStyle(
-                          color: Colors.green,
-                          fontWeight: FontWeight.w600,
+                      Expanded(
+                        child: Text(
+                          'Voice message attached',
+                          style: TextStyle(
+                            color: Colors.green,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ],
                   ),
                 ),
+              ],
 
               const SizedBox(height: 28),
 
-              // =========================
-              // REPORT DISASTER
-              // =========================
+              // EMERGENCY CONTACTS
+              const Text(
+                'Emergency Contacts',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 12),
 
+              navigationCard(
+                icon: Icons.contacts,
+                iconColor: Colors.red,
+                title: 'Emergency Contacts',
+                subtitle: 'Manage your trusted emergency contacts.',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const EmergencyContactsScreen(),
+                    ),
+                  );
+                },
+              ),
+
+              const SizedBox(height: 24),
+
+              // LIVE LOCATION
+              const Text(
+                'Live Location',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              navigationCard(
+                icon: Icons.location_on,
+                iconColor: Colors.red,
+                title: 'Live Location',
+                subtitle: 'View your current GPS location on map.',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const LiveLocationScreen(),
+                    ),
+                  );
+                },
+              ),
+
+              const SizedBox(height: 24),
+
+              // REPORT A DISASTER
               const Text(
                 'Report a Disaster',
                 style: TextStyle(
@@ -572,61 +616,26 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 12),
 
-              InkWell(
+              navigationCard(
+                icon: Icons.report_problem_outlined,
+                iconColor: Colors.orange,
+                title: 'Report a Disaster',
+                subtitle: 'Report a disaster or dangerous situation.',
                 onTap: () {
                   Navigator.push(
                     context,
                     MaterialPageRoute(
-                      builder: (context) =>
-                      const ReportDisasterScreen(),
+                      builder: (context) => const ReportDisasterScreen(),
                     ),
                   );
                 },
-                borderRadius: BorderRadius.circular(16),
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: Colors.grey.shade200,
-                    ),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(
-                        Icons.report_problem_outlined,
-                        color: Colors.orange,
-                        size: 30,
-                      ),
-                      SizedBox(width: 14),
-                      Expanded(
-                        child: Text(
-                          'Report a disaster or dangerous situation.',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      Icon(
-                        Icons.arrow_forward_ios,
-                        size: 16,
-                      ),
-                    ],
-                  ),
-                ),
               ),
 
               const SizedBox(height: 24),
 
-              // =========================
               // LIFELINK NETWORK
-              // =========================
-
               const Text(
                 'LIFELINK Network',
                 style: TextStyle(
@@ -634,61 +643,26 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 12),
 
-              InkWell(
+              navigationCard(
+                icon: Icons.hub_outlined,
+                iconColor: const Color(0xFF1976D2),
+                title: 'LIFELINK Network',
+                subtitle: 'Connect with nearby LIFELINK users.',
                 onTap: () {
                   Navigator.push(
                     context,
                     MaterialPageRoute(
-                      builder: (context) =>
-                      const LifelinkNetworkScreen(),
+                      builder: (context) => const LifelinkNetworkScreen(),
                     ),
                   );
                 },
-                borderRadius: BorderRadius.circular(16),
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: Colors.grey.shade200,
-                    ),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(
-                        Icons.hub_outlined,
-                        color: Color(0xFF1976D2),
-                        size: 30,
-                      ),
-                      SizedBox(width: 14),
-                      Expanded(
-                        child: Text(
-                          'Connect with nearby LIFELINK users.',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      Icon(
-                        Icons.arrow_forward_ios,
-                        size: 16,
-                      ),
-                    ],
-                  ),
-                ),
               ),
 
               const SizedBox(height: 24),
 
-              // =========================
               // ACTIVE REPORTS
-              // =========================
-
               const Text(
                 'Active Reports',
                 style: TextStyle(
@@ -696,61 +670,26 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 12),
 
-              InkWell(
+              navigationCard(
+                icon: Icons.warning_amber_rounded,
+                iconColor: Colors.red,
+                title: 'Active Reports',
+                subtitle: 'View active emergency and disaster reports.',
                 onTap: () {
                   Navigator.push(
                     context,
                     MaterialPageRoute(
-                      builder: (context) =>
-                      const ActiveReportsScreen(),
+                      builder: (context) => const ActiveReportsScreen(),
                     ),
                   );
                 },
-                borderRadius: BorderRadius.circular(16),
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: Colors.grey.shade200,
-                    ),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(
-                        Icons.warning_amber_rounded,
-                        color: Colors.red,
-                        size: 30,
-                      ),
-                      SizedBox(width: 14),
-                      Expanded(
-                        child: Text(
-                          'View active emergency and disaster reports.',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      Icon(
-                        Icons.arrow_forward_ios,
-                        size: 16,
-                      ),
-                    ],
-                  ),
-                ),
               ),
 
               const SizedBox(height: 24),
 
-              // =========================
               // EMERGENCY INSTRUCTIONS
-              // =========================
-
               const Text(
                 'Emergency Instructions',
                 style: TextStyle(
@@ -758,10 +697,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
               const SizedBox(height: 12),
 
-              InkWell(
+              navigationCard(
+                icon: Icons.menu_book_outlined,
+                iconColor: Colors.green,
+                title: 'Emergency Instructions',
+                subtitle:
+                'Get instructions for different emergency situations.',
                 onTap: () {
                   Navigator.push(
                     context,
@@ -771,40 +714,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   );
                 },
-                borderRadius: BorderRadius.circular(16),
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: Colors.grey.shade200,
-                    ),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(
-                        Icons.menu_book_outlined,
-                        color: Colors.green,
-                        size: 30,
-                      ),
-                      SizedBox(width: 14),
-                      Expanded(
-                        child: Text(
-                          'Get instructions for different emergency situations.',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      Icon(
-                        Icons.arrow_forward_ios,
-                        size: 16,
-                      ),
-                    ],
-                  ),
-                ),
               ),
             ],
           ),
