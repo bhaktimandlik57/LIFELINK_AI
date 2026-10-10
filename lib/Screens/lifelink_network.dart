@@ -10,6 +10,7 @@ import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class LifelinkNetworkScreen extends StatefulWidget {
 const LifelinkNetworkScreen({super.key});
@@ -24,15 +25,17 @@ extends State<LifelinkNetworkScreen> {
 static const String lifelinkServiceUuid =
 'bf27730d-860a-4e09-889c-2d8b6a9e0fe7';
 
-static const String lifelinkTxUuid =
-defaultTxCharacteristicUuid;
+static const String lifelinkTxUuid = defaultTxCharacteristicUuid;
+static const String lifelinkRxUuid = defaultRxCharacteristicUuid;
 
-static const String lifelinkRxUuid =
-defaultRxCharacteristicUuid;
+static const int sosMagic = 0x4C4C5331; // LLS1
+static const int voiceMagic = 0x4C4C5631; // LLV1
 
 final FlutterBlePeripheral peripheral = FlutterBlePeripheral();
 final AudioPlayer audioPlayer = AudioPlayer();
 final List<ScanResult> nearbyDevices = [];
+
+final BytesBuilder _sosBuffer = BytesBuilder();
 final BytesBuilder _voiceBuffer = BytesBuilder();
 
 StreamSubscription<Uint8List>? peripheralReceiveSubscription;
@@ -41,18 +44,19 @@ StreamSubscription<List<ScanResult>>? scanSubscription;
 bool isScanning = false;
 bool isAdvertising = false;
 bool isSending = false;
+bool _receivingSos = false;
+bool _receivingVoice = false;
+bool _isDeletingSos = false;
 
 String relayStatus = 'Waiting for network';
 
 Map<String, dynamic>? receivedSosData;
 String? receivedVoicePath;
 
+int _expectedSosLength = 0;
 int _expectedVoiceLength = 0;
-bool _receivingVoice = false;
-
-// ------------------------------------------------------------
-// INIT
-// ------------------------------------------------------------
+int _nextSosOffset = 0;
+int _nextVoiceOffset = 0;
 
 @override
 void initState() {
@@ -86,10 +90,6 @@ receivedVoicePath = voicePath;
 } catch (_) {}
 }
 
-// ------------------------------------------------------------
-// DISPOSE
-// ------------------------------------------------------------
-
 @override
 void dispose() {
 scanSubscription?.cancel();
@@ -108,21 +108,27 @@ super.dispose();
 }
 
 // ------------------------------------------------------------
-// PERIPHERAL RECEIVER
+// BLE RECEIVER
 // ------------------------------------------------------------
 
 void _startPeripheralListener() {
 peripheralReceiveSubscription =
 peripheral.onDataReceived.listen(
-(Uint8List bytes) {
+(bytes) {
 _handleIncomingBytes(bytes);
 },
-onError: (_) {},
+onError: (Object error) {
+if (mounted) {
+setState(() {
+relayStatus = 'BLE receive error: $error';
+});
+}
+},
 );
 }
 
 // ------------------------------------------------------------
-// START LIFELINK NETWORK
+// START NETWORK
 // ------------------------------------------------------------
 
 Future<void> startAdvertising() async {
@@ -151,14 +157,10 @@ relayStatus = 'LIFELINK Network active';
 if (!mounted) return;
 
 setState(() {
-relayStatus = 'BLE error: $e';
+relayStatus = 'BLE advertising error: $e';
 });
 }
 }
-
-// ------------------------------------------------------------
-// STOP LIFELINK NETWORK
-// ------------------------------------------------------------
 
 Future<void> stopAdvertising() async {
 try {
@@ -174,100 +176,227 @@ relayStatus = 'Waiting for network';
 }
 
 // ------------------------------------------------------------
-// SCAN FOR NEARBY LIFELINK DEVICES
+// SCAN FOR LIFELINK DEVICES
 // ------------------------------------------------------------
 
-Future<void> scanForDevices() async {
-if (isScanning) return;
 
-try {
-if (mounted) {
-setState(() {
-isScanning = true;
-nearbyDevices.clear();
-relayStatus = 'Scanning for LIFELINK devices...';
-});
-}
 
-var adapterState = await FlutterBluePlus.adapterState.first;
+  Future<void> scanForDevices() async {
+    if (isScanning) return;
 
-if (adapterState != BluetoothAdapterState.on &&
-Platform.isAndroid) {
-try {
-await FlutterBluePlus.turnOn();
-} catch (_) {}
+    try {
+      setState(() {
+        isScanning = true;
+        nearbyDevices.clear();
+        relayStatus = 'Checking Bluetooth permissions...';
+      });
 
-adapterState = await FlutterBluePlus.adapterState.first;
-}
+      // Request permissions needed for BLE scanning.
+      if (Platform.isAndroid) {
+        final scanPermission = await Permission.bluetoothScan.request();
+        final connectPermission =
+        await Permission.bluetoothConnect.request();
 
-if (adapterState != BluetoothAdapterState.on) {
-if (mounted) {
-setState(() {
-relayStatus =
-'Bluetooth is off. Enable Bluetooth to relay SOS.';
-});
-}
-return;
-}
+        // Android 11 and older also need location permission.
+        PermissionStatus locationPermission = PermissionStatus.granted;
+        if (await Permission.locationWhenInUse.isDenied) {
+          locationPermission =
+          await Permission.locationWhenInUse.request();
+        } else {
+          locationPermission =
+          await Permission.locationWhenInUse.status;
+        }
 
-await scanSubscription?.cancel();
+        if (!scanPermission.isGranted ||
+            !connectPermission.isGranted) {
+          throw Exception(
+            'Allow Nearby devices permission in phone Settings.',
+          );
+        }
 
-scanSubscription = FlutterBluePlus.onScanResults.listen(
-(results) {
-for (final result in results) {
-final alreadyAdded = nearbyDevices.any(
-(device) =>
-device.device.remoteId ==
-result.device.remoteId,
+        if (await Permission.bluetoothScan.isPermanentlyDenied ||
+            await Permission.bluetoothConnect.isPermanentlyDenied) {
+          throw Exception(
+            'Bluetooth permission is permanently denied. '
+                'Enable Nearby devices in Settings.',
+          );
+        }
+
+        // Location is needed for scanning on Android 11 and older.
+        if (await Permission.locationWhenInUse.isDenied &&
+            !locationPermission.isGranted) {
+          throw Exception(
+            'Allow Location permission for Bluetooth scanning.',
+          );
+        }
+      }
+
+      final adapterState = await FlutterBluePlus.adapterState.first;
+
+      if (adapterState != BluetoothAdapterState.on) {
+        throw Exception('Turn on Bluetooth and try again.');
+      }
+
+      await scanSubscription?.cancel();
+
+      scanSubscription = FlutterBluePlus.onScanResults.listen(
+            (results) {
+          for (final result in results) {
+            // Display LIFELINK devices by advertised name or service UUID.
+            final name =
+            result.advertisementData.advName.toUpperCase();
+
+            final hasName = name.contains('LIFELINK');
+
+            final hasService =
+            result.advertisementData.serviceUuids.any(
+                  (uuid) =>
+              uuid.str.toLowerCase() ==
+                  lifelinkServiceUuid.toLowerCase(),
+            );
+
+            if (!hasName && !hasService) continue;
+
+            final alreadyAdded = nearbyDevices.any(
+                  (item) =>
+              item.device.remoteId == result.device.remoteId,
+            );
+
+            if (!alreadyAdded && mounted) {
+              setState(() {
+                nearbyDevices.add(result);
+                relayStatus =
+                '${nearbyDevices.length} LIFELINK device(s) found';
+              });
+            }
+          }
+        },
+        onError: (Object error) {
+          if (mounted) {
+            setState(() {
+              relayStatus = 'Scan error: $error';
+            });
+          }
+        },
+      );
+
+      setState(() {
+        relayStatus = 'Scanning for 12 seconds...';
+      });
+
+      // IMPORTANT: Keep the scan running long enough to discover devices.
+      await FlutterBluePlus.startScan(
+        timeout: const Duration(seconds: 12),
+      );
+
+      await Future.delayed(const Duration(seconds: 12));
+
+      await FlutterBluePlus.stopScan();
+      await scanSubscription?.cancel();
+      scanSubscription = null;
+
+      if (mounted) {
+        setState(() {
+          relayStatus = nearbyDevices.isEmpty
+              ? 'No LIFELINK devices found. Check receiver advertising.'
+              : '${nearbyDevices.length} LIFELINK device(s) found';
+        });
+      }
+    } catch (e) {
+      try {
+        await FlutterBluePlus.stopScan();
+      } catch (_) {}
+
+      await scanSubscription?.cancel();
+      scanSubscription = null;
+
+      if (mounted) {
+        setState(() {
+          relayStatus = 'Scan failed: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          isScanning = false;
+        });
+      }
+    }
+  }
+
+
+// ------------------------------------------------------------
+// DELETE RECENT SOS
+// ------------------------------------------------------------
+
+Future<void> deleteRecentSOS() async {
+if (isSending || _isDeletingSos) return;
+
+final confirm = await showDialog<bool>(
+context: context,
+builder: (dialogContext) => AlertDialog(
+title: const Text('Delete Recent SOS?'),
+content: const Text(
+'This will remove the SOS saved on this phone and clear '
+'the saved voice-recording reference. It will not delete '
+'SOS data already received on another phone.',
+),
+actions: [
+TextButton(
+onPressed: () =>
+Navigator.pop(dialogContext, false),
+child: const Text('Cancel'),
+),
+ElevatedButton(
+style: ElevatedButton.styleFrom(
+backgroundColor: Colors.red,
+foregroundColor: Colors.white,
+),
+onPressed: () =>
+Navigator.pop(dialogContext, true),
+child: const Text('Delete'),
+),
+],
+),
 );
 
-if (!alreadyAdded && mounted) {
-setState(() {
-nearbyDevices.add(result);
-});
-}
-}
-},
-onError: (_) {},
-);
+if (confirm != true) return;
 
-await FlutterBluePlus.startScan(
-withServices: [Guid(lifelinkServiceUuid)],
-timeout: const Duration(seconds: 4),
-androidUsesFineLocation: true,
-);
+if (!mounted) return;
+
+setState(() {
+_isDeletingSos = true;
+relayStatus = 'Deleting saved SOS...';
+});
 
 try {
-await FlutterBluePlus.stopScan();
-} catch (_) {}
+final prefs = await SharedPreferences.getInstance();
 
-await scanSubscription?.cancel();
-scanSubscription = null;
+// Remove the outgoing SOS and stale recording reference.
+await prefs.remove('latest_sos');
+await prefs.remove('latest_voice_path');
 
-if (mounted) {
+if (!mounted) return;
+
 setState(() {
-relayStatus = nearbyDevices.isEmpty
-? 'No LIFELINK device found'
-    : '${nearbyDevices.length} LIFELINK device(s) found';
+relayStatus = 'Recent SOS deleted. Ready for a new SOS.';
 });
-}
+
+_showMessage(
+'Recent SOS deleted. You can create a new SOS now.',
+);
 } catch (e) {
-try {
-await FlutterBluePlus.stopScan();
-} catch (_) {}
-
-await scanSubscription?.cancel();
-scanSubscription = null;
-
 if (mounted) {
 setState(() {
-relayStatus = 'Scan error: $e';
+relayStatus = 'Could not delete SOS.';
 });
 }
+
+_showMessage('Unable to delete SOS: $e');
 } finally {
 if (mounted) {
 setState(() {
-isScanning = false;
+_isDeletingSos = false;
 });
 }
 }
@@ -287,56 +416,41 @@ final prefs = await SharedPreferences.getInstance();
 final sosString = prefs.getString('latest_sos');
 
 if (sosString == null || sosString.isEmpty) {
-_showMessage('No SOS data available.');
+_showMessage('No SOS data available. Create a new SOS first.');
 return;
 }
 
 final sosData =
 jsonDecode(sosString) as Map<String, dynamic>;
 
-// Find the voice recording attached to this SOS.
+// Only use the voice path saved with this specific SOS.
 String? voicePath;
-final storedVoicePath = sosData['voicePath'];
+final storedPath = sosData['voicePath'];
 
-if (storedVoicePath != null &&
-storedVoicePath.toString().isNotEmpty) {
-final file = File(storedVoicePath.toString());
+if (storedPath != null &&
+storedPath.toString().isNotEmpty) {
+final file = File(storedPath.toString());
 
 if (await file.exists()) {
-voicePath = storedVoicePath.toString();
+voicePath = storedPath.toString();
 }
 }
 
-if (voicePath == null) {
-final latestVoicePath =
-prefs.getString('latest_voice_path');
-
-if (latestVoicePath != null &&
-latestVoicePath.isNotEmpty) {
-final voiceFile = File(latestVoicePath);
-
-if (await voiceFile.exists()) {
-voicePath = latestVoicePath;
-}
-}
-}
-
-// Scan if no nearby device has been found yet.
 if (nearbyDevices.isEmpty) {
 await scanForDevices();
 }
+
+if (!mounted) return;
 
 if (nearbyDevices.isEmpty) {
 _showMessage('No nearby LIFELINK device found.');
 return;
 }
 
-if (mounted) {
 setState(() {
 isSending = true;
 relayStatus = 'Connecting to nearby device...';
 });
-}
 
 final device = nearbyDevices.first.device;
 connectedDevice = device;
@@ -347,7 +461,7 @@ timeout: const Duration(seconds: 20),
 autoConnect: false,
 );
 
-final int mtu = device.mtuNow;
+final mtu = device.mtuNow;
 
 if (mounted) {
 setState(() {
@@ -355,17 +469,17 @@ relayStatus = 'Connected • MTU $mtu';
 });
 }
 
-// Discover LIFELINK services and RX characteristic.
 final services = await device.discoverServices();
+
 BluetoothCharacteristic? rxCharacteristic;
 
 for (final service in services) {
-if (service.uuid == Guid(lifelinkServiceUuid)) {
+if (service.uuid != Guid(lifelinkServiceUuid)) continue;
+
 for (final characteristic in service.characteristics) {
 if (characteristic.uuid == Guid(lifelinkRxUuid)) {
 rxCharacteristic = characteristic;
 break;
-}
 }
 }
 
@@ -373,14 +487,18 @@ if (rxCharacteristic != null) break;
 }
 
 if (rxCharacteristic == null) {
-throw Exception('LIFELINK RX characteristic not found');
+throw Exception(
+'LIFELINK RX characteristic not found. '
+'Check the receiver GATT configuration.',
+);
 }
 
 if (!rxCharacteristic.properties.write) {
-throw Exception('RX characteristic does not support write');
+throw Exception(
+'Receiver RX characteristic does not support writing.',
+);
 }
 
-// Send SOS details.
 final sosPacket = <String, dynamic>{
 'packetType': 'LIFELINK_SOS',
 'sosId': sosData['sosId'],
@@ -393,22 +511,27 @@ final sosPacket = <String, dynamic>{
 'voiceAttached': voicePath != null,
 };
 
-final jsonBytes = utf8.encode(jsonEncode(sosPacket));
-
-await _writeInChunks(
-rxCharacteristic,
-Uint8List.fromList(jsonBytes),
+final sosBytes = Uint8List.fromList(
+utf8.encode(jsonEncode(sosPacket)),
 );
 
-// Send the actual voice recording, if attached.
-if (voicePath != null) {
-final file = File(voicePath);
+await _sendFramedData(
+rxCharacteristic,
+sosBytes,
+mtu,
+dataMarker: 0x53,
+startMagic: sosMagic,
+endMagic: const [0x45, 0x4C, 0x4C, 0x53, 0x31],
+);
 
-if (await file.exists()) {
-final audioBytes = await file.readAsBytes();
+if (voicePath != null) {
+final voiceFile = File(voicePath);
+
+if (await voiceFile.exists()) {
+final audioBytes = await voiceFile.readAsBytes();
 
 if (audioBytes.isEmpty) {
-throw Exception('Voice file is empty');
+throw Exception('Voice recording is empty.');
 }
 
 if (mounted) {
@@ -418,10 +541,13 @@ relayStatus =
 });
 }
 
-await _sendVoiceFile(
+await _sendFramedData(
 rxCharacteristic,
 audioBytes,
 mtu,
+dataMarker: 0x43,
+startMagic: voiceMagic,
+endMagic: const [0x45, 0x4C, 0x4C, 0x56, 0x31],
 );
 }
 }
@@ -441,14 +567,14 @@ jsonEncode(updatedSos),
 if (mounted) {
 setState(() {
 isSending = false;
-relayStatus = 'SOS and voice sent successfully';
+relayStatus = 'SOS transfer completed';
 });
 }
 
 _showMessage(
 voicePath != null
-? 'SOS and voice sent successfully.'
-    : 'SOS sent successfully. No voice attached.',
+? 'SOS and voice transfer completed.'
+    : 'SOS transfer completed. No voice attached.',
 );
 } catch (e) {
 try {
@@ -458,80 +584,62 @@ await connectedDevice?.disconnect();
 if (mounted) {
 setState(() {
 isSending = false;
-relayStatus = 'Send failed';
+relayStatus = 'Send failed: $e';
 });
 }
 
 _showMessage('Send error: $e');
+} finally {
+if (mounted && isSending) {
+setState(() {
+isSending = false;
+});
+}
 }
 }
 
 // ------------------------------------------------------------
-// WRITE SOS JSON IN CHUNKS
+// SEND FRAMED SOS OR VOICE DATA
 // ------------------------------------------------------------
 
-Future<void> _writeInChunks(
+Future<void> _sendFramedData(
 BluetoothCharacteristic characteristic,
 Uint8List data,
-) async {
-const int chunkSize = 100;
+int mtu, {
+required int dataMarker,
+required int startMagic,
+required List<int> endMagic,
+}) async {
+final start = ByteData(8);
+start.setUint32(0, startMagic, Endian.big);
+start.setUint32(4, data.length, Endian.big);
 
-for (int i = 0; i < data.length; i += chunkSize) {
-final int end =
-(i + chunkSize < data.length)
-? i + chunkSize
+await characteristic.write(
+start.buffer.asUint8List(),
+withoutResponse: false,
+timeout: 30,
+);
+
+final chunkSize = mtu - 8;
+
+if (chunkSize <= 0) {
+throw Exception('Invalid BLE MTU: $mtu');
+}
+
+for (int offset = 0; offset < data.length; offset += chunkSize) {
+final end = (offset + chunkSize < data.length)
+? offset + chunkSize
     : data.length;
 
-await characteristic.write(
-data.sublist(i, end),
-withoutResponse: false,
-timeout: 30,
-);
-}
-}
+final part = data.sublist(offset, end);
+final packet = Uint8List(5 + part.length);
 
-// ------------------------------------------------------------
-// SEND VOICE FILE
-// ------------------------------------------------------------
+packet[0] = dataMarker;
 
-Future<void> _sendVoiceFile(
-BluetoothCharacteristic characteristic,
-Uint8List audioBytes,
-int mtu,
-) async {
-// Start frame: LLV1 + audio length.
-final ByteData startData = ByteData(8);
+final header = ByteData.sublistView(packet);
+header.setUint32(1, offset, Endian.big);
 
-startData.setUint32(0, 0x4C4C5631, Endian.big);
-startData.setUint32(4, audioBytes.length, Endian.big);
-
-await characteristic.write(
-startData.buffer.asUint8List(),
-withoutResponse: false,
-timeout: 30,
-);
-
-int audioChunkSize = mtu - 8;
-
-if (audioChunkSize < 50) audioChunkSize = 50;
-if (audioChunkSize > 180) audioChunkSize = 180;
-
-for (int i = 0; i < audioBytes.length; i += audioChunkSize) {
-final int end =
-(i + audioChunkSize < audioBytes.length)
-? i + audioChunkSize
-    : audioBytes.length;
-
-final Uint8List audioChunk = audioBytes.sublist(i, end);
-final Uint8List packet = Uint8List(5 + audioChunk.length);
-
-// C marker + 4-byte offset + audio bytes.
-packet[0] = 0x43;
-
-final ByteData offsetData = ByteData.sublistView(packet);
-offsetData.setUint32(1, i, Endian.big);
-
-packet.setRange(5, packet.length, audioChunk);
+packet.setRange(5, packet.length, part);
 
 await characteristic.write(
 packet,
@@ -539,71 +647,76 @@ withoutResponse: false,
 timeout: 30,
 );
 
-await Future.delayed(const Duration(milliseconds: 3));
+await Future.delayed(
+const Duration(milliseconds: 3),
+);
 }
 
-// End frame: ELLV1.
-final Uint8List endPacket = Uint8List.fromList([
-0x45,
-0x4C,
-0x4C,
-0x56,
-0x31,
-]);
-
 await characteristic.write(
-endPacket,
+endMagic,
 withoutResponse: false,
 timeout: 30,
 );
 }
 
 // ------------------------------------------------------------
-// RECEIVE DATA
+// RECEIVE FRAMED DATA
 // ------------------------------------------------------------
 
 Future<void> _handleIncomingBytes(Uint8List bytes) async {
 if (bytes.isEmpty) return;
 
-// Voice start frame.
-if (bytes.length == 8 &&
-bytes[0] == 0x4C &&
-bytes[1] == 0x4C &&
-bytes[2] == 0x56 &&
-bytes[3] == 0x31) {
-final ByteData data = ByteData.sublistView(bytes);
+if (bytes.length == 8) {
+final header = ByteData.sublistView(bytes);
+final magic = header.getUint32(0, Endian.big);
+final length = header.getUint32(4, Endian.big);
 
-_expectedVoiceLength = data.getUint32(4, Endian.big);
+if (length == 0 || length > 20 * 1024 * 1024) {
+return;
+}
+
+if (magic == sosMagic) {
+_expectedSosLength = length;
+_sosBuffer.clear();
+_nextSosOffset = 0;
+_receivingSos = true;
+_receivingVoice = false;
+
+if (mounted) {
+setState(() {
+relayStatus = 'Receiving SOS data...';
+});
+}
+return;
+}
+
+if (magic == voiceMagic) {
+_expectedVoiceLength = length;
 _voiceBuffer.clear();
+_nextVoiceOffset = 0;
 _receivingVoice = true;
+_receivingSos = false;
 
 if (mounted) {
 setState(() {
 relayStatus = 'Receiving voice message...';
 });
 }
+return;
+}
+}
 
+if (_receivingSos &&
+bytes.length == 5 &&
+bytes[0] == 0x45 &&
+bytes[1] == 0x4C &&
+bytes[2] == 0x4C &&
+bytes[3] == 0x53 &&
+bytes[4] == 0x31) {
+await _finishSosReceive();
 return;
 }
 
-// Voice data chunk.
-if (_receivingVoice &&
-bytes.length >= 5 &&
-bytes[0] == 0x43) {
-final Uint8List audioPart = bytes.sublist(5);
-_voiceBuffer.add(audioPart);
-
-if (mounted) {
-setState(() {
-relayStatus =
-'Receiving voice • ${_voiceBuffer.length} / $_expectedVoiceLength bytes';
-});
-}
-
-return;
-}
-
-// Voice end frame.
 if (_receivingVoice &&
 bytes.length == 5 &&
 bytes[0] == 0x45 &&
@@ -615,21 +728,87 @@ await _finishVoiceReceive();
 return;
 }
 
-// SOS JSON packet.
+if (_receivingSos &&
+bytes.length >= 5 &&
+bytes[0] == 0x53) {
+final header = ByteData.sublistView(bytes);
+final offset = header.getUint32(1, Endian.big);
+
+if (offset != _nextSosOffset) {
+_receivingSos = false;
+_sosBuffer.clear();
+
+if (mounted) {
+setState(() {
+relayStatus = 'SOS transfer failed: missing chunk';
+});
+}
+return;
+}
+
+final part = bytes.sublist(5);
+_sosBuffer.add(part);
+_nextSosOffset += part.length;
+return;
+}
+
+if (_receivingVoice &&
+bytes.length >= 5 &&
+bytes[0] == 0x43) {
+final header = ByteData.sublistView(bytes);
+final offset = header.getUint32(1, Endian.big);
+
+if (offset != _nextVoiceOffset) {
+_receivingVoice = false;
+_voiceBuffer.clear();
+
+if (mounted) {
+setState(() {
+relayStatus = 'Voice transfer failed: missing chunk';
+});
+}
+return;
+}
+
+final part = bytes.sublist(5);
+_voiceBuffer.add(part);
+_nextVoiceOffset += part.length;
+}
+}
+
+// ------------------------------------------------------------
+// FINISH SOS RECEIVE
+// ------------------------------------------------------------
+
+Future<void> _finishSosReceive() async {
+final bytes = _sosBuffer.takeBytes();
+_receivingSos = false;
+
+if (bytes.length != _expectedSosLength) {
+if (mounted) {
+setState(() {
+relayStatus =
+'SOS incomplete: ${bytes.length}/$_expectedSosLength bytes';
+});
+}
+return;
+}
+
 try {
-final String text = utf8.decode(
-bytes,
-allowMalformed: false,
-);
+final data =
+jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
 
-if (!text.contains('LIFELINK_SOS')) return;
-
-final Map<String, dynamic> data =
-jsonDecode(text) as Map<String, dynamic>;
+if (data['packetType'] != 'LIFELINK_SOS') {
+throw const FormatException('Invalid SOS packet');
+}
 
 await _receiveSOS(data);
-} catch (_) {
-// Ignore invalid or incomplete packets.
+} catch (e) {
+if (mounted) {
+setState(() {
+relayStatus = 'Invalid SOS data: $e';
+});
+}
 }
 }
 
@@ -638,24 +817,15 @@ await _receiveSOS(data);
 // ------------------------------------------------------------
 
 Future<void> _finishVoiceReceive() async {
-final Uint8List audioBytes = _voiceBuffer.takeBytes();
+final audioBytes = _voiceBuffer.takeBytes();
 _receivingVoice = false;
 
-if (audioBytes.isEmpty) {
-if (mounted) {
-setState(() {
-relayStatus = 'Voice transfer failed: empty audio';
-});
-}
-return;
-}
-
-if (_expectedVoiceLength > 0 &&
+if (audioBytes.isEmpty ||
 audioBytes.length != _expectedVoiceLength) {
 if (mounted) {
 setState(() {
 relayStatus =
-'Voice received partially (${audioBytes.length}/$_expectedVoiceLength bytes)';
+'Voice incomplete: ${audioBytes.length}/$_expectedVoiceLength bytes';
 });
 }
 return;
@@ -665,12 +835,11 @@ try {
 final directory = await getApplicationDocumentsDirectory();
 
 final path =
-'${directory.path}/received_lifelink_voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+'${directory.path}/received_lifelink_voice_'
+'${DateTime.now().millisecondsSinceEpoch}.m4a';
 
 final file = File(path);
 await file.writeAsBytes(audioBytes, flush: true);
-
-receivedVoicePath = path;
 
 final prefs = await SharedPreferences.getInstance();
 await prefs.setString('received_voice_path', path);
@@ -678,7 +847,6 @@ await prefs.setString('received_voice_path', path);
 if (receivedSosData != null) {
 receivedSosData =
 Map<String, dynamic>.from(receivedSosData!);
-
 receivedSosData!['voiceAttached'] = true;
 
 await prefs.setString(
@@ -687,11 +855,12 @@ jsonEncode(receivedSosData),
 );
 }
 
-if (mounted) {
+if (!mounted) return;
+
 setState(() {
+receivedVoicePath = path;
 relayStatus = 'SOS and voice received';
 });
-}
 } catch (e) {
 if (mounted) {
 setState(() {
@@ -706,20 +875,8 @@ relayStatus = 'Voice save failed: $e';
 // ------------------------------------------------------------
 
 Future<void> _receiveSOS(Map<String, dynamic> data) async {
-final sosId = data['sosId']?.toString();
 final prefs = await SharedPreferences.getInstance();
-
-final previousId = prefs.getString('last_received_sos_id');
-
-if (sosId != null &&
-sosId == previousId &&
-data['voiceAttached'] != true) {
-return;
-}
-
-if (sosId != null) {
-await prefs.setString('last_received_sos_id', sosId);
-}
+final sosId = data['sosId']?.toString();
 
 final receivedData = Map<String, dynamic>.from(data);
 receivedData['status'] = 'RECEIVED';
@@ -730,14 +887,16 @@ await prefs.setString(
 jsonEncode(receivedData),
 );
 
-if (mounted) {
+if (sosId != null) {
+await prefs.setString('last_received_sos_id', sosId);
+}
+
+if (!mounted) return;
+
 setState(() {
 receivedSosData = receivedData;
-relayStatus = data['voiceAttached'] == true
-? 'SOS received • Waiting for voice'
-    : 'SOS received';
+relayStatus = 'SOS received';
 });
-}
 }
 
 // ------------------------------------------------------------
@@ -757,9 +916,7 @@ _showMessage('No voice message received.');
 return;
 }
 
-final file = File(path);
-
-if (!await file.exists()) {
+if (!await File(path).exists()) {
 _showMessage('Voice file not found.');
 return;
 }
@@ -772,10 +929,6 @@ _showMessage('Unable to play voice: $e');
 }
 }
 
-// ------------------------------------------------------------
-// MESSAGE
-// ------------------------------------------------------------
-
 void _showMessage(String message) {
 if (!mounted) return;
 
@@ -783,10 +936,6 @@ ScaffoldMessenger.of(context).showSnackBar(
 SnackBar(content: Text(message)),
 );
 }
-
-// ------------------------------------------------------------
-// DEVICE NAME
-// ------------------------------------------------------------
 
 String _deviceName(ScanResult result) {
 final name = result.advertisementData.advName;
@@ -831,7 +980,8 @@ size: 35,
 const SizedBox(width: 15),
 Expanded(
 child: Column(
-crossAxisAlignment: CrossAxisAlignment.start,
+crossAxisAlignment:
+CrossAxisAlignment.start,
 children: [
 const Text(
 'LIFELINK Network',
@@ -849,7 +999,6 @@ Text(relayStatus),
 ),
 ),
 ),
-
 const SizedBox(height: 20),
 
 SizedBox(
@@ -870,7 +1019,6 @@ isAdvertising
 ),
 ),
 ),
-
 const SizedBox(height: 12),
 
 SizedBox(
@@ -885,7 +1033,6 @@ isScanning
 ),
 ),
 ),
-
 const SizedBox(height: 20),
 
 SizedBox(
@@ -894,16 +1041,36 @@ child: ElevatedButton.icon(
 onPressed: isSending ? null : sendLatestSOS,
 icon: const Icon(Icons.sos),
 label: Text(
-isSending
-? 'Sending SOS...'
-    : 'Send Latest SOS',
+isSending ? 'Sending SOS...' : 'Send Latest SOS',
 ),
 ),
 ),
+const SizedBox(height: 10),
 
-const SizedBox(height: 25),
+SizedBox(
+height: 50,
+child: OutlinedButton.icon(
+onPressed: (isSending || _isDeletingSos)
+? null
+    : deleteRecentSOS,
+icon: const Icon(
+Icons.delete_outline,
+color: Colors.red,
+),
+label: Text(
+_isDeletingSos
+? 'Deleting SOS...'
+    : 'Delete Recent SOS',
+style: const TextStyle(color: Colors.red),
+),
+style: OutlinedButton.styleFrom(
+side: const BorderSide(color: Colors.red),
+),
+),
+),
 
 if (nearbyDevices.isNotEmpty) ...[
+const SizedBox(height: 25),
 const Text(
 'Nearby Devices',
 style: TextStyle(
@@ -912,8 +1079,6 @@ fontWeight: FontWeight.bold,
 ),
 ),
 const SizedBox(height: 10),
-],
-
 ...nearbyDevices.map(
 (result) => Card(
 child: ListTile(
@@ -925,10 +1090,10 @@ result.device.remoteId.toString(),
 ),
 ),
 ),
+],
 
 if (receivedSosData != null) ...[
 const SizedBox(height: 25),
-
 const Text(
 'Received SOS',
 style: TextStyle(
@@ -936,9 +1101,7 @@ fontSize: 22,
 fontWeight: FontWeight.bold,
 ),
 ),
-
 const SizedBox(height: 10),
-
 Card(
 child: Padding(
 padding: const EdgeInsets.all(18),
@@ -953,134 +1116,52 @@ fontSize: 17,
 fontWeight: FontWeight.bold,
 ),
 ),
-
 const SizedBox(height: 10),
-
 Text(
 'SOS ID: ${receivedSosData!['sosId'] ?? '-'}',
 ),
-
 const SizedBox(height: 8),
-
 Text(
 'Latitude: ${receivedSosData!['latitude'] ?? '-'}',
 ),
-
 const SizedBox(height: 8),
-
 Text(
 'Longitude: ${receivedSosData!['longitude'] ?? '-'}',
 ),
-
 const SizedBox(height: 8),
-
 Text(
 'Network: ${receivedSosData!['network'] ?? '-'}',
 ),
-
 const SizedBox(height: 18),
 
 if (_receivingVoice)
-Container(
-width: double.infinity,
-padding: const EdgeInsets.all(14),
-decoration: BoxDecoration(
-borderRadius: BorderRadius.circular(12),
-border: Border.all(color: Colors.orange),
-),
-child: const Row(
-children: [
-Icon(Icons.mic, color: Colors.orange),
-SizedBox(width: 10),
-Expanded(
-child: Text(
-'Receiving voice message...',
-style: TextStyle(
-fontWeight: FontWeight.bold,
-),
-),
-),
-SizedBox(
-width: 20,
-height: 20,
-child: CircularProgressIndicator(
-strokeWidth: 2,
-),
-),
-],
-),
+const ListTile(
+leading: CircularProgressIndicator(),
+title: Text('Receiving voice message...'),
 ),
 
 if (!_receivingVoice &&
 receivedVoicePath != null)
-Container(
-width: double.infinity,
-padding: const EdgeInsets.all(14),
-decoration: BoxDecoration(
-borderRadius: BorderRadius.circular(12),
-border: Border.all(color: Colors.green),
-),
-child: Column(
-crossAxisAlignment: CrossAxisAlignment.start,
-children: [
-const Row(
-children: [
-Icon(Icons.mic, color: Colors.green),
-SizedBox(width: 10),
-Expanded(
-child: Text(
-'Voice Message Received',
-style: TextStyle(
-fontWeight: FontWeight.bold,
-),
-),
-),
-],
-),
-
-const SizedBox(height: 12),
-
 SizedBox(
 width: double.infinity,
 height: 50,
 child: ElevatedButton.icon(
 onPressed: playReceivedVoice,
 icon: const Icon(Icons.play_arrow),
-label: const Text(
-'Play Received Voice',
-),
-),
-),
-],
+label: const Text('Play Received Voice'),
 ),
 ),
 
 if (!_receivingVoice &&
 receivedVoicePath == null &&
 receivedSosData!['voiceAttached'] == true)
-Container(
-width: double.infinity,
-padding: const EdgeInsets.all(14),
-decoration: BoxDecoration(
-borderRadius: BorderRadius.circular(12),
-border: Border.all(color: Colors.orange),
-),
-child: const Row(
-children: [
-Icon(
+const ListTile(
+leading: Icon(
 Icons.hourglass_empty,
 color: Colors.orange,
 ),
-SizedBox(width: 10),
-Expanded(
-child: Text(
-'Voice message is being received...',
-style: TextStyle(
-fontWeight: FontWeight.bold,
-),
-),
-),
-],
+title: Text(
+'Waiting for voice message...',
 ),
 ),
 ],
